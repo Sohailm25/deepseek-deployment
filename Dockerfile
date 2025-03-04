@@ -10,7 +10,9 @@ RUN apt-get update && apt-get install -y \
 
 # Copy requirements first for better caching
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Explicitly update bitsandbytes first, then install requirements
+RUN pip install --no-cache-dir -U bitsandbytes>=0.42.0 && \
+    pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY . .

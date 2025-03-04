@@ -1,7 +1,7 @@
 import os
 import logging
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from typing import Dict, List, Optional, Tuple, Any
 
 logger = logging.getLogger(__name__)
@@ -56,10 +56,15 @@ class ModelManager:
                     gpu_kwargs["max_memory"] = max_memory
                     logger.info(f"Setting GPU memory limit to {memory_gb}GB per GPU")
                 
-                # Set 8-bit quantization if enabled
+                # Configure quantization with BitsAndBytesConfig
                 if LOAD_IN_8BIT:
-                    logger.info("Loading model in 8-bit quantization mode to reduce memory usage")
-                    gpu_kwargs["load_in_8bit"] = True
+                    logger.info("Loading model with 8-bit quantization via BitsAndBytesConfig")
+                    quantization_config = BitsAndBytesConfig(
+                        load_in_8bit=True,
+                        llm_int8_threshold=6.0,
+                        llm_int8_has_fp16_weight=False
+                    )
+                    gpu_kwargs["quantization_config"] = quantization_config
                 
                 # Configure tensor parallelism
                 if TENSOR_PARALLEL_SIZE > 1:
