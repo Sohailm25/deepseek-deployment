@@ -16,6 +16,7 @@ MODEL_ID = os.environ.get("MODEL_ID", DEFAULT_MODEL_ID)
 DEVICE = os.environ.get("DEVICE", DEFAULT_DEVICE)
 PRECISION = os.environ.get("PRECISION", DEFAULT_PRECISION)
 MAX_GPU_MEMORY = os.environ.get("MAX_GPU_MEMORY", None)  # In GB, None means use all available
+LOAD_IN_8BIT = os.environ.get("LOAD_IN_8BIT", "false").lower() == "true"  # Parse 8-bit loading option
 
 class ModelManager:
     def __init__(self):
@@ -24,7 +25,7 @@ class ModelManager:
         self._is_loaded = False
         
         # Log configuration
-        logger.info(f"Model configuration: model_id={MODEL_ID}, device={DEVICE}, precision={PRECISION}")
+        logger.info(f"Model configuration: model_id={MODEL_ID}, device={DEVICE}, precision={PRECISION}, 8bit={LOAD_IN_8BIT}")
         
     def is_loaded(self) -> bool:
         return self._is_loaded
@@ -46,6 +47,11 @@ class ModelManager:
                     max_memory = {i: f"{memory_gb}GiB" for i in range(torch.cuda.device_count())}
                     gpu_kwargs["max_memory"] = max_memory
                     logger.info(f"Setting GPU memory limit to {memory_gb}GB per GPU")
+                
+                # Set 8-bit quantization if enabled
+                if LOAD_IN_8BIT:
+                    logger.info("Loading model in 8-bit quantization mode to reduce memory usage")
+                    gpu_kwargs["load_in_8bit"] = True
             else:
                 device_map = "cpu"
                 torch_dtype = torch.float32

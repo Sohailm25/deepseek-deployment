@@ -20,6 +20,8 @@ ENV MODEL_ID="deepseek-ai/deepseek-coder-7b-instruct"
 ENV PORT=8000
 ENV DEVICE="cuda"
 ENV PRECISION="bfloat16"
+ENV MAX_GPU_MEMORY=6  # Limit GPU memory usage to prevent OOM errors
+ENV LOAD_IN_8BIT=true  # Enable 8-bit quantization for memory efficiency
 
 # Expose the port the app runs on
 EXPOSE 8000
