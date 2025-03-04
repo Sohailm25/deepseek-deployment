@@ -6,23 +6,34 @@ from typing import Dict, List, Optional, Tuple, Any
 
 logger = logging.getLogger(__name__)
 
-# Default model settings
-DEFAULT_MODEL_ID = "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
-DEFAULT_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# Check if CUDA is actually available regardless of what the environment says
+CUDA_AVAILABLE = torch.cuda.is_available()
+if not CUDA_AVAILABLE:
+    logger.warning("CUDA was requested but is not available! Falling back to CPU.")
+
+# Default model settings - use a smaller model if CUDA isn't available
+DEFAULT_MODEL_ID = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B" if not CUDA_AVAILABLE else "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
+DEFAULT_DEVICE = "cuda" if CUDA_AVAILABLE else "cpu"
 DEFAULT_PRECISION = "bfloat16" if DEFAULT_DEVICE == "cuda" else "float32"
 DEFAULT_TEMPERATURE = 0.6  # Recommended temperature for DeepSeek-R1
 DEFAULT_TRUST_REMOTE_CODE = "true"  # Required for Qwen models
 DEFAULT_TENSOR_PARALLEL_SIZE = "1"  # Default to no tensor parallelism
+DEFAULT_LOAD_IN_8BIT = "true" if CUDA_AVAILABLE else "false"  # Only use 8-bit with CUDA
 
-# Environment variable overrides
+# Environment variable overrides - but validate them against reality
 MODEL_ID = os.environ.get("MODEL_ID", DEFAULT_MODEL_ID)
-DEVICE = os.environ.get("DEVICE", DEFAULT_DEVICE)
+DEVICE = "cuda" if os.environ.get("DEVICE", DEFAULT_DEVICE) == "cuda" and CUDA_AVAILABLE else "cpu"
 PRECISION = os.environ.get("PRECISION", DEFAULT_PRECISION)
-MAX_GPU_MEMORY = os.environ.get("MAX_GPU_MEMORY", None)  # In GB, None means use all available
-LOAD_IN_8BIT = os.environ.get("LOAD_IN_8BIT", "false").lower() == "true"  # Parse 8-bit loading option
-TEMPERATURE = float(os.environ.get("TEMPERATURE", DEFAULT_TEMPERATURE))  # Default temperature for generation
+MAX_GPU_MEMORY = os.environ.get("MAX_GPU_MEMORY", None) if CUDA_AVAILABLE else None
+LOAD_IN_8BIT = os.environ.get("LOAD_IN_8BIT", DEFAULT_LOAD_IN_8BIT).lower() == "true" and CUDA_AVAILABLE
+TEMPERATURE = float(os.environ.get("TEMPERATURE", DEFAULT_TEMPERATURE))
 TRUST_REMOTE_CODE = os.environ.get("TRUST_REMOTE_CODE", DEFAULT_TRUST_REMOTE_CODE).lower() == "true"
-TENSOR_PARALLEL_SIZE = int(os.environ.get("TENSOR_PARALLEL_SIZE", DEFAULT_TENSOR_PARALLEL_SIZE))
+TENSOR_PARALLEL_SIZE = int(os.environ.get("TENSOR_PARALLEL_SIZE", DEFAULT_TENSOR_PARALLEL_SIZE)) if CUDA_AVAILABLE else 1
+
+# If we're not on CUDA but the model requested is too large, switch to a smaller one
+if DEVICE == "cpu" and "32B" in MODEL_ID:
+    logger.warning(f"Model {MODEL_ID} is too large for CPU. Switching to DeepSeek-R1-Distill-Qwen-1.5B")
+    MODEL_ID = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 
 class ModelManager:
     def __init__(self):
@@ -31,9 +42,9 @@ class ModelManager:
         self._is_loaded = False
         
         # Log configuration
-        logger.info(f"Model configuration: model_id={MODEL_ID}, device={DEVICE}, precision={PRECISION}, "
-                   f"8bit={LOAD_IN_8BIT}, temperature={TEMPERATURE}, trust_remote_code={TRUST_REMOTE_CODE}, "
-                   f"tensor_parallel_size={TENSOR_PARALLEL_SIZE}")
+        logger.info(f"Model configuration: model_id={MODEL_ID}, device={DEVICE}, cuda_available={CUDA_AVAILABLE}, "
+                   f"precision={PRECISION}, 8bit={LOAD_IN_8BIT}, temperature={TEMPERATURE}, "
+                   f"trust_remote_code={TRUST_REMOTE_CODE}, tensor_parallel_size={TENSOR_PARALLEL_SIZE}")
         
     def is_loaded(self) -> bool:
         return self._is_loaded
@@ -43,45 +54,7 @@ class ModelManager:
         logger.info(f"Loading model {MODEL_ID} on {DEVICE}...")
         
         try:
-            # Configure device mapping and quantization
-            if DEVICE == "cuda":
-                device_map = "auto"
-                torch_dtype = torch.bfloat16 if PRECISION == "bfloat16" else torch.float16
-                
-                # Configure GPU memory limit if specified
-                gpu_kwargs = {}
-                if MAX_GPU_MEMORY:
-                    memory_gb = int(MAX_GPU_MEMORY)
-                    max_memory = {i: f"{memory_gb}GiB" for i in range(torch.cuda.device_count())}
-                    gpu_kwargs["max_memory"] = max_memory
-                    logger.info(f"Setting GPU memory limit to {memory_gb}GB per GPU")
-                
-                # Configure quantization with BitsAndBytesConfig
-                if LOAD_IN_8BIT:
-                    logger.info("Loading model with 8-bit quantization via BitsAndBytesConfig")
-                    quantization_config = BitsAndBytesConfig(
-                        load_in_8bit=True,
-                        llm_int8_threshold=6.0,
-                        llm_int8_has_fp16_weight=False
-                    )
-                    gpu_kwargs["quantization_config"] = quantization_config
-                
-                # Configure tensor parallelism
-                if TENSOR_PARALLEL_SIZE > 1:
-                    logger.info(f"Enabling tensor parallelism with {TENSOR_PARALLEL_SIZE} GPUs")
-                    if "model_kwargs" not in gpu_kwargs:
-                        gpu_kwargs["model_kwargs"] = {}
-                    
-                    # Add tensor parallel configuration to model kwargs
-                    gpu_kwargs["model_kwargs"]["tensor_parallel_size"] = TENSOR_PARALLEL_SIZE
-                    # We need to use device_map="auto" when using tensor parallelism
-                    device_map = "auto"
-            else:
-                device_map = "cpu"
-                torch_dtype = torch.float32
-                gpu_kwargs = {}
-            
-            # Load tokenizer
+            # Load tokenizer first
             logger.info(f"Loading tokenizer with trust_remote_code={TRUST_REMOTE_CODE}")
             self.tokenizer = AutoTokenizer.from_pretrained(
                 MODEL_ID,
@@ -89,14 +62,59 @@ class ModelManager:
                 trust_remote_code=TRUST_REMOTE_CODE
             )
             
+            # Configure device mapping and quantization
+            model_kwargs = {}
+            
+            if DEVICE == "cuda":
+                device_map = "auto"
+                torch_dtype = torch.bfloat16 if PRECISION == "bfloat16" else torch.float16
+                
+                # Configure GPU memory limit if specified
+                if MAX_GPU_MEMORY:
+                    memory_gb = int(MAX_GPU_MEMORY)
+                    max_memory = {i: f"{memory_gb}GiB" for i in range(torch.cuda.device_count())}
+                    model_kwargs["max_memory"] = max_memory
+                    logger.info(f"Setting GPU memory limit to {memory_gb}GB per GPU")
+                
+                # Configure quantization with BitsAndBytesConfig
+                if LOAD_IN_8BIT:
+                    try:
+                        logger.info("Loading model with 8-bit quantization via BitsAndBytesConfig")
+                        quantization_config = BitsAndBytesConfig(
+                            load_in_8bit=True,
+                            llm_int8_threshold=6.0,
+                            llm_int8_has_fp16_weight=False
+                        )
+                        model_kwargs["quantization_config"] = quantization_config
+                    except Exception as e:
+                        logger.warning(f"8-bit quantization failed, continuing without it: {str(e)}")
+                
+                # Configure tensor parallelism
+                if TENSOR_PARALLEL_SIZE > 1:
+                    logger.info(f"Enabling tensor parallelism with {TENSOR_PARALLEL_SIZE} GPUs")
+                    if "model_kwargs" not in model_kwargs:
+                        model_kwargs["model_kwargs"] = {}
+                    
+                    # Add tensor parallel configuration to model kwargs
+                    model_kwargs["model_kwargs"]["tensor_parallel_size"] = TENSOR_PARALLEL_SIZE
+            else:
+                logger.info("Running on CPU - disabling all GPU-specific optimizations")
+                device_map = "cpu"
+                torch_dtype = torch.float32
+                
+                # If model is large and we're on CPU, load with low_cpu_mem_usage=True
+                if "7B" in MODEL_ID or "14B" in MODEL_ID or "32B" in MODEL_ID:
+                    logger.info("Large model on CPU - enabling low_cpu_mem_usage")
+                    model_kwargs["low_cpu_mem_usage"] = True
+            
             # Load model
-            logger.info(f"Loading model with trust_remote_code={TRUST_REMOTE_CODE}")
+            logger.info(f"Loading model with trust_remote_code={TRUST_REMOTE_CODE} and device={DEVICE}")
             self.model = AutoModelForCausalLM.from_pretrained(
                 MODEL_ID,
                 device_map=device_map,
                 torch_dtype=torch_dtype,
                 trust_remote_code=TRUST_REMOTE_CODE,
-                **gpu_kwargs
+                **model_kwargs
             )
             
             # Set pad token if not set
@@ -104,7 +122,7 @@ class ModelManager:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
             
             self._is_loaded = True
-            logger.info(f"Model loaded successfully")
+            logger.info(f"Model loaded successfully on {DEVICE}")
         
         except Exception as e:
             logger.error(f"Failed to load model: {str(e)}")
