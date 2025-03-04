@@ -159,86 +159,145 @@ class ModelManager:
                 top_p: float = 0.95,
                 top_k: int = 50,
                 stop_sequences: Optional[List[str]] = None) -> Tuple[str, Dict[str, int]]:
-        """
-        Generate text based on the prompt
+        """Generate text from a prompt
         
         Args:
-            prompt: The input prompt
+            prompt: The prompt to generate from
             max_tokens: Maximum number of tokens to generate
-            temperature: Sampling temperature (uses default if None)
-            top_p: Nucleus sampling parameter
-            top_k: Top-k sampling parameter
-            stop_sequences: List of sequences that stop generation
+            temperature: Temperature for sampling, 0.0 = greedy
+            top_p: Top-p sampling
+            top_k: Top-k sampling
+            stop_sequences: List of sequences to stop generation at
             
         Returns:
-            Tuple of (generated_text, usage_info)
+            A tuple of (generated_text, usage)
         """
         if not self.is_loaded():
             raise RuntimeError("Model not loaded")
         
-        # Use default temperature if not specified
+        # Set default temperature
         if temperature is None:
             temperature = TEMPERATURE
-        
-        # Log generation parameters
-        logger.info(f"Generation parameters: max_tokens={max_tokens}, temp={temperature}, top_p={top_p}, top_k={top_k}")
-        
-        # Format the prompt according to DeepSeek-R1 format
+            
+        # Format prompt for the model
         formatted_prompt = self._format_prompt(prompt)
         
-        # Encode the input
-        input_ids = self.tokenizer.encode(formatted_prompt, return_tensors="pt").to(self.model.device)
-        input_length = input_ids.shape[1]
+        # Tokenize the prompt
+        inputs = self.tokenizer(formatted_prompt, return_tensors="pt", padding=True)
         
-        # Configure generation parameters
-        gen_kwargs = {
-            "input_ids": input_ids,
-            "max_new_tokens": max_tokens,
-            "temperature": temperature,
-            "top_p": top_p,
-            "top_k": top_k,
-            "do_sample": temperature > 0,
-            "pad_token_id": self.tokenizer.pad_token_id,
-            "eos_token_id": self.tokenizer.eos_token_id,
-        }
+        # Explicitly set attention mask (fixes warning)
+        input_ids = inputs["input_ids"]
+        if "attention_mask" not in inputs:
+            inputs["attention_mask"] = torch.ones_like(input_ids)
         
-        # Add stopping criteria if provided
+        # Move to device
+        inputs = {k: v.to(DEVICE) for k, v in inputs.items()}
+        
+        # Count input tokens
+        input_length = len(inputs["input_ids"][0])
+        
+        # Set up stopping criteria
+        stopping_criteria = []
+        
+        # Add stopping criteria for stop sequences if provided
         if stop_sequences:
-            from transformers import StoppingCriteriaList, StoppingCriteria
-            
             class StopSequenceCriteria(StoppingCriteria):
                 def __init__(self, tokenizer, stop_sequences, input_length):
+                    StoppingCriteria.__init__(self)
                     self.tokenizer = tokenizer
                     self.stop_sequences = stop_sequences
                     self.input_length = input_length
-                
+                    
                 def __call__(self, input_ids, scores, **kwargs):
-                    generated_text = self.tokenizer.decode(input_ids[0][self.input_length:])
-                    for stop_seq in self.stop_sequences:
-                        if stop_seq in generated_text:
+                    # Convert the generated tokens to text
+                    for seq in self.stop_sequences:
+                        # Check if any sequences have been generated
+                        if input_ids.shape[1] <= self.input_length:
+                            continue
+                            
+                        # Get the generated text so far
+                        generated_text = self.tokenizer.decode(
+                            input_ids[0, self.input_length:],
+                            skip_special_tokens=True
+                        )
+                        
+                        # Check if any stop sequence exists in the generated text
+                        if seq in generated_text:
                             return True
+                            
                     return False
+                    
+            stopping_criteria.append(StopSequenceCriteria(self.tokenizer, stop_sequences, input_length))
             
-            gen_kwargs["stopping_criteria"] = StoppingCriteriaList([
-                StopSequenceCriteria(self.tokenizer, stop_sequences, input_length)
-            ])
+        # Add length stopping criteria
+        stopping_criteria.append(MaxLengthCriteria(max_length=input_length + max_tokens))
+        stopping_criteria = StoppingCriteriaList(stopping_criteria)
         
-        # Generate text
-        with torch.no_grad():
-            output = self.model.generate(**gen_kwargs)
+        # Check for CPU usage and limit max_tokens if needed
+        adjusted_max_tokens = max_tokens
+        if DEVICE == "cpu" and adjusted_max_tokens > 75:
+            # To prevent timeouts, limit token generation on CPU
+            logger.warning(f"Limiting max_tokens from {max_tokens} to 75 to prevent timeout on CPU")
+            adjusted_max_tokens = 75
         
-        # Decode and process output
-        generated_text = self.tokenizer.decode(output[0][input_length:], skip_special_tokens=True)
-        
-        # Calculate token usage
-        input_tokens = input_ids.shape[1]
-        output_tokens = output.shape[1] - input_tokens
-        total_tokens = input_tokens + output_tokens
-        
-        usage = {
-            "prompt_tokens": input_tokens,
-            "completion_tokens": output_tokens,
-            "total_tokens": total_tokens
+        # Generate with faster settings on CPU
+        generation_config = {
+            "do_sample": temperature > 0.0,
+            "temperature": temperature,
+            "top_p": top_p,
+            "top_k": top_k,
+            "max_new_tokens": adjusted_max_tokens,
+            "stopping_criteria": stopping_criteria,
+            "pad_token_id": self.tokenizer.pad_token_id,
         }
         
-        return generated_text, usage 
+        # If running on CPU, optimize for speed
+        if DEVICE == "cpu":
+            # Use greedy decoding if temperature is very low
+            if temperature < 0.1:
+                generation_config["do_sample"] = False
+            
+            # Set a low repetition penalty
+            generation_config["repetition_penalty"] = 1.05
+            
+            logger.info("Using optimized settings for CPU generation")
+        
+        try:
+            with torch.inference_mode():
+                output = self.model.generate(
+                    **inputs,
+                    **generation_config
+                )
+        except Exception as e:
+            logger.error(f"Error during generation: {str(e)}")
+            # Fall back to simpler generation on error
+            try:
+                logger.info("Falling back to simpler generation method")
+                with torch.inference_mode():
+                    output = self.model.generate(
+                        inputs["input_ids"],
+                        max_new_tokens=adjusted_max_tokens,
+                        do_sample=temperature > 0.0,
+                        temperature=temperature
+                    )
+            except Exception as inner_e:
+                logger.error(f"Fallback generation also failed: {str(inner_e)}")
+                raise
+            
+        # Decode the output
+        generated_text = self.tokenizer.decode(output[0][input_length:], skip_special_tokens=True)
+        
+        # Trim at the first stop sequence if provided
+        if stop_sequences:
+            for stop_seq in stop_sequences:
+                if stop_seq in generated_text:
+                    generated_text = generated_text[:generated_text.find(stop_seq)]
+        
+        # Calculate usage
+        usage = {
+            "prompt_tokens": input_length,
+            "completion_tokens": len(output[0]) - input_length,
+            "total_tokens": len(output[0])
+        }
+        
+        return generated_text.strip(), usage 
