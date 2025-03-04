@@ -7,10 +7,12 @@ from typing import Dict, List, Optional, Tuple, Any
 logger = logging.getLogger(__name__)
 
 # Default model settings
-DEFAULT_MODEL_ID = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+DEFAULT_MODEL_ID = "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
 DEFAULT_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DEFAULT_PRECISION = "bfloat16" if DEFAULT_DEVICE == "cuda" else "float32"
 DEFAULT_TEMPERATURE = 0.6  # Recommended temperature for DeepSeek-R1
+DEFAULT_TRUST_REMOTE_CODE = "true"  # Required for Qwen models
+DEFAULT_TENSOR_PARALLEL_SIZE = "1"  # Default to no tensor parallelism
 
 # Environment variable overrides
 MODEL_ID = os.environ.get("MODEL_ID", DEFAULT_MODEL_ID)
@@ -19,6 +21,8 @@ PRECISION = os.environ.get("PRECISION", DEFAULT_PRECISION)
 MAX_GPU_MEMORY = os.environ.get("MAX_GPU_MEMORY", None)  # In GB, None means use all available
 LOAD_IN_8BIT = os.environ.get("LOAD_IN_8BIT", "false").lower() == "true"  # Parse 8-bit loading option
 TEMPERATURE = float(os.environ.get("TEMPERATURE", DEFAULT_TEMPERATURE))  # Default temperature for generation
+TRUST_REMOTE_CODE = os.environ.get("TRUST_REMOTE_CODE", DEFAULT_TRUST_REMOTE_CODE).lower() == "true"
+TENSOR_PARALLEL_SIZE = int(os.environ.get("TENSOR_PARALLEL_SIZE", DEFAULT_TENSOR_PARALLEL_SIZE))
 
 class ModelManager:
     def __init__(self):
@@ -27,7 +31,9 @@ class ModelManager:
         self._is_loaded = False
         
         # Log configuration
-        logger.info(f"Model configuration: model_id={MODEL_ID}, device={DEVICE}, precision={PRECISION}, 8bit={LOAD_IN_8BIT}, temperature={TEMPERATURE}")
+        logger.info(f"Model configuration: model_id={MODEL_ID}, device={DEVICE}, precision={PRECISION}, "
+                   f"8bit={LOAD_IN_8BIT}, temperature={TEMPERATURE}, trust_remote_code={TRUST_REMOTE_CODE}, "
+                   f"tensor_parallel_size={TENSOR_PARALLEL_SIZE}")
         
     def is_loaded(self) -> bool:
         return self._is_loaded
@@ -54,24 +60,37 @@ class ModelManager:
                 if LOAD_IN_8BIT:
                     logger.info("Loading model in 8-bit quantization mode to reduce memory usage")
                     gpu_kwargs["load_in_8bit"] = True
+                
+                # Configure tensor parallelism
+                if TENSOR_PARALLEL_SIZE > 1:
+                    logger.info(f"Enabling tensor parallelism with {TENSOR_PARALLEL_SIZE} GPUs")
+                    if "model_kwargs" not in gpu_kwargs:
+                        gpu_kwargs["model_kwargs"] = {}
+                    
+                    # Add tensor parallel configuration to model kwargs
+                    gpu_kwargs["model_kwargs"]["tensor_parallel_size"] = TENSOR_PARALLEL_SIZE
+                    # We need to use device_map="auto" when using tensor parallelism
+                    device_map = "auto"
             else:
                 device_map = "cpu"
                 torch_dtype = torch.float32
                 gpu_kwargs = {}
             
             # Load tokenizer
+            logger.info(f"Loading tokenizer with trust_remote_code={TRUST_REMOTE_CODE}")
             self.tokenizer = AutoTokenizer.from_pretrained(
                 MODEL_ID,
                 padding_side="left",
-                trust_remote_code=True
+                trust_remote_code=TRUST_REMOTE_CODE
             )
             
             # Load model
+            logger.info(f"Loading model with trust_remote_code={TRUST_REMOTE_CODE}")
             self.model = AutoModelForCausalLM.from_pretrained(
                 MODEL_ID,
                 device_map=device_map,
                 torch_dtype=torch_dtype,
-                trust_remote_code=True,
+                trust_remote_code=TRUST_REMOTE_CODE,
                 **gpu_kwargs
             )
             

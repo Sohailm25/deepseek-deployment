@@ -16,16 +16,20 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Set environment variables
-ENV MODEL_ID="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+ENV MODEL_ID="deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
 ENV PORT=8000
 ENV DEVICE="cuda"
 ENV PRECISION="bfloat16"
-# Limit GPU memory usage to prevent OOM errors
-ENV MAX_GPU_MEMORY=6
+# Limit GPU memory usage to prevent OOM errors - increased for 32B model
+ENV MAX_GPU_MEMORY=24
 # Enable 8-bit quantization for memory efficiency
 ENV LOAD_IN_8BIT=true
 # Set temperature for DeepSeek-R1 (recommended: 0.6)
 ENV TEMPERATURE=0.6
+# Ensure trust_remote_code is enabled
+ENV TRUST_REMOTE_CODE="true"
+# Enable tensor parallelism for large models
+ENV TENSOR_PARALLEL_SIZE="2"
 
 # Expose the port the app runs on
 EXPOSE 8000
