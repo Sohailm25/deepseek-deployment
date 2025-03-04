@@ -7,9 +7,10 @@ from typing import Dict, List, Optional, Tuple, Any
 logger = logging.getLogger(__name__)
 
 # Default model settings
-DEFAULT_MODEL_ID = "deepseek-ai/deepseek-coder-7b-instruct"
+DEFAULT_MODEL_ID = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
 DEFAULT_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DEFAULT_PRECISION = "bfloat16" if DEFAULT_DEVICE == "cuda" else "float32"
+DEFAULT_TEMPERATURE = 0.6  # Recommended temperature for DeepSeek-R1
 
 # Environment variable overrides
 MODEL_ID = os.environ.get("MODEL_ID", DEFAULT_MODEL_ID)
@@ -17,6 +18,7 @@ DEVICE = os.environ.get("DEVICE", DEFAULT_DEVICE)
 PRECISION = os.environ.get("PRECISION", DEFAULT_PRECISION)
 MAX_GPU_MEMORY = os.environ.get("MAX_GPU_MEMORY", None)  # In GB, None means use all available
 LOAD_IN_8BIT = os.environ.get("LOAD_IN_8BIT", "false").lower() == "true"  # Parse 8-bit loading option
+TEMPERATURE = float(os.environ.get("TEMPERATURE", DEFAULT_TEMPERATURE))  # Default temperature for generation
 
 class ModelManager:
     def __init__(self):
@@ -25,13 +27,13 @@ class ModelManager:
         self._is_loaded = False
         
         # Log configuration
-        logger.info(f"Model configuration: model_id={MODEL_ID}, device={DEVICE}, precision={PRECISION}, 8bit={LOAD_IN_8BIT}")
+        logger.info(f"Model configuration: model_id={MODEL_ID}, device={DEVICE}, precision={PRECISION}, 8bit={LOAD_IN_8BIT}, temperature={TEMPERATURE}")
         
     def is_loaded(self) -> bool:
         return self._is_loaded
     
     def load_model(self):
-        """Load the Deepseek model and tokenizer"""
+        """Load the DeepSeek-R1 model and tokenizer"""
         logger.info(f"Loading model {MODEL_ID} on {DEVICE}...")
         
         try:
@@ -84,6 +86,13 @@ class ModelManager:
             logger.error(f"Failed to load model: {str(e)}")
             raise
     
+    def _format_prompt(self, prompt: str) -> str:
+        """
+        Format the prompt according to DeepSeek-R1 format requirements.
+        DeepSeek-R1 uses a simple prompt format: "<human>: {prompt}\n<bot>: "
+        """
+        return f"<human>: {prompt}\n<bot>: "
+    
     def unload_model(self):
         """Unload the model to free up resources"""
         if self.model:
@@ -104,7 +113,7 @@ class ModelManager:
     def generate(self, 
                 prompt: str, 
                 max_tokens: int = 256,
-                temperature: float = 0.7,
+                temperature: float = None,
                 top_p: float = 0.95,
                 top_k: int = 50,
                 stop_sequences: Optional[List[str]] = None) -> Tuple[str, Dict[str, int]]:
@@ -114,7 +123,7 @@ class ModelManager:
         Args:
             prompt: The input prompt
             max_tokens: Maximum number of tokens to generate
-            temperature: Sampling temperature
+            temperature: Sampling temperature (uses default if None)
             top_p: Nucleus sampling parameter
             top_k: Top-k sampling parameter
             stop_sequences: List of sequences that stop generation
@@ -125,11 +134,18 @@ class ModelManager:
         if not self.is_loaded():
             raise RuntimeError("Model not loaded")
         
+        # Use default temperature if not specified
+        if temperature is None:
+            temperature = TEMPERATURE
+        
         # Log generation parameters
         logger.info(f"Generation parameters: max_tokens={max_tokens}, temp={temperature}, top_p={top_p}, top_k={top_k}")
         
+        # Format the prompt according to DeepSeek-R1 format
+        formatted_prompt = self._format_prompt(prompt)
+        
         # Encode the input
-        input_ids = self.tokenizer.encode(prompt, return_tensors="pt").to(self.model.device)
+        input_ids = self.tokenizer.encode(formatted_prompt, return_tensors="pt").to(self.model.device)
         input_length = input_ids.shape[1]
         
         # Configure generation parameters
